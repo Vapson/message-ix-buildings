@@ -10,6 +10,7 @@
 
 fun_stock_dyn <- function(sector,
                           mod_arch, # mod_arch = "new", mod_arch = "stock"
+                          mod_vacant, #V:
                           yrs,i,
                           run, #ssp_r, # removed ssp dimension
                           geo_level, geo_level_aggr,geo_levels,
@@ -20,6 +21,8 @@ fun_stock_dyn <- function(sector,
                           stock_aggr, bld_det_age_i, #bld_det, 
                           #bld_eneff_age, # keep track of age
                           prob_dem,
+                          stock_vacant_i, # V:
+                          rate_vacant_occ, # V:
                           #rate_ren_low, rate_ren_high, #ren_rate,
                           rate_switch_fuel_heat,
                           #ms_new, ms_ren,
@@ -31,6 +34,7 @@ fun_stock_dyn <- function(sector,
                           en_hh_hw_scen, en_m2_hw_scen, en_int_others,
                           #en_stock,
                           mat_int,
+                          shr_mat_eol,
                           #mat_stock,
                           report_var,
                           report
@@ -65,11 +69,11 @@ ct_bld_age_i <- ct_bld_age %>% filter(yrs[i] >= year_i & yrs[i] <= year_f) %>%
 
 # Calculate demolitions - detailed - by fuel, yr_con - i-th year
 dem_det_age_i <- bld_det_age_i %>% filter(year == yrs[i-1]) %>%  # Stock from previous year
-  select(-year) %>%
   #mutate(age = yrs[i]-yr_con) %>% # Calculate age of buildings
   # left_join(b) %>% # Attach probability of demolition
   left_join(prob_dem %>% pivot_wider(names_from="parameter",values_from = "prob_dem")) %>% 
   #left_join(bld_dyn_par %>% select(-c(p_dem_hist, p_ren_hist, ren_tau, ren_sd, l_new, l_ren))) %>% # Attach probability of demolition
+  select(-year) %>%
   mutate(pdem = pweibull(yrs[i]-yr_con, shape = shape, scale = scale) - pweibull(yrs[i-1]-yr_con, shape = shape, scale = scale)) %>% #CDF: difference between two consecutive time steps
   mutate(n_dem = ifelse(n_units_fuel>0,round(pdem * n_units_fuel,rnd),0)) %>%
   rename(n_units_fuel_p = n_units_fuel) %>% # N. units are from the previous time-step
@@ -197,6 +201,64 @@ if(mod_arch == "new"){
   ## TEST: N. empty buildings
   print(paste("Empty buildings (det): ", round(sum(dem_det_age_i$n_empty),0)))
   print(paste("Empty buildings (aggr): ", round(sum(bld_aggr_i$n_empty),0)))
+  
+  
+  ## Vacant buildings accounting - V:
+  
+  if (mod_vacant == "vacant") {
+    
+    # Update vacant buildings for the current year
+    stock_vacant_i = stock_vacant_i %>%
+      filter(year == yrs[i-1]) %>%
+      left_join(dem_det_age_i %>%
+                  group_by_at(setdiff(names(dem_det_age_i), c("fuel_heat", "fuel_cool","n_units_fuel_p", "n_dem", "n_empty"))) %>% # Select all variables, except the ones specified
+                  summarise(n_empty = sum(n_empty)) %>%
+                  ungroup()) %>%
+      left_join(rate_vacant_occ) %>%
+      mutate(n_empty = ifelse(is.na(n_empty),0,n_empty)) %>%
+      mutate(stock_vacant = (stock_vacant + n_empty)*(1-(stp*rate_vacant_occ))) %>%
+      mutate(stock_reocc = (stock_vacant + n_empty)*stp*rate_vacant_occ) %>%
+      select(-n_empty, -rate_vacant_occ) %>%
+      mutate(year=yrs[i])
+    
+    # Update aggregate new construction estimated to account for re-occupation - only allow re-occupation as substitution to new buildings
+    bld_aggr_i_reocc <-  bld_aggr_i %>% 
+      left_join(stock_vacant_i %>%
+                  group_by_at(setdiff(names(stock_vacant_i), c("eneff","bld_age","yr_con","stock_vacant","stock_reocc"))) %>%
+                  summarise(n_reocc = sum(stock_reocc)) %>%
+                  ungroup()) %>%
+      mutate(n_reocc = ifelse(is.na(n_reocc),0,n_reocc)) %>% 
+      mutate(n_reocc_upd = pmin(n_reocc, n_new)) %>%
+      mutate(shr_reocc_upd = ifelse(n_reocc_upd == 0 & n_reocc == 0, 0, n_reocc_upd/n_reocc)) %>%
+      mutate(n_new = n_new - n_reocc_upd) %>%
+      select(-n_reocc)
+    
+    # update detailed reoccupied buildings numbers based on actual demand
+    stock_vacant_i <- stock_vacant_i %>%
+      left_join(bld_aggr_i_reocc %>% select(-c("n_units_aggr", "var_aggr", "n_dem", "n_new",  "n_empty",  "n_reocc_upd"))) %>%
+      mutate(stock_reocc = stock_reocc * shr_reocc_upd) %>%
+      mutate(stock_vacant = ifelse(is.na(stock_vacant),0,stock_vacant)) %>%
+      mutate(stock_reocc = ifelse(is.na(stock_reocc),0,stock_reocc)) %>%
+      select(-shr_reocc_upd) 
+    
+    # Updated aggregate stock dataframe
+    bld_aggr_i <- bld_aggr_i_reocc %>% select(-n_reocc_upd, shr_reocc_upd)  
+    
+    # Update detailed existing buildings - demolitions
+    dem_det_age_i <- dem_det_age_i %>%
+      group_by_at(setdiff(names(dem_det_age_i), c("fuel_heat", "fuel_cool", "n_units_fuel_p", "n_dem", "n_empty"))) %>%
+      mutate(n_units_aggr = sum(n_units_fuel_p)) %>%
+      ungroup() %>%
+      mutate(shr_units = ifelse(n_units_aggr == 0, 0, n_units_fuel_p/n_units_aggr)) %>%
+      left_join(stock_vacant_i %>% select(-stock_vacant,-year)) %>%
+      mutate(stock_reocc_det = ifelse(shr_units == 0 | stock_reocc == 0, 0, stock_reocc * shr_units)) %>%
+      mutate(stock_reocc_det = ifelse(is.na(stock_reocc_det), 0, stock_reocc_det)) %>%
+      mutate(n_units_fuel_p = n_units_fuel_p + stock_reocc_det) %>%
+      select(-c(n_units_aggr, shr_units, stock_reocc, stock_reocc_det))
+    
+    rm(bld_aggr_i_reocc)
+  }
+  
   
   # Update stock results by age - disaggregated - current timestep
   
@@ -533,9 +595,9 @@ if(sector == "resid"){
     #mutate(floor_heat_Mm2 = ifelse(acc_heat == 1, floor_Mm2, 0)) %>%
     mutate(floor_cool_Mm2 = ifelse(shr_acc_cool == 1, floor_Mm2 * shr_acc_cool, 0)) %>%
     mutate(heat_TJ = ifelse(fuel_heat == "v_no_heat", 0, en_dem_heat * n_units_fuel / 1e6 * hh_size * floor_cap * 3.6)) %>% # converted from kWh to MJ (3.6). Houssing units are in million, so results are in TJ.
-    #mutate(cool_TJ = en_dem_cool * shr_acc_cool * n_units_fuel / 1e6 * hh_size * floor_cap * 3.6) %>% # converted from kWh to MJ (3.6). Houssing units are in million, so results are in TJ.
-    #mutate(cool_ac_TJ = en_dem_c_ac * shr_acc_cool * n_units_fuel / 1e6 * hh_size * floor_cap * 3.6) %>% # converted from kWh to MJ (3.6). Houssing units are in million, so results are in TJ.
-    #mutate(cool_fans_TJ = en_dem_c_fans * shr_acc_cool * n_units_fuel / 1e6 * hh_size * floor_cap * 3.6) %>% # Note:shr_acc_cool=1 for all cases (access calculated before) #converted from kWh to MJ (3.6). Houssing units are in million, so results are in TJ.
+#    mutate(cool_TJ = en_dem_cool * shr_acc_cool * n_units_fuel / 1e6 * hh_size * floor_cap * 3.6) %>% # converted from kWh to MJ (3.6). Houssing units are in million, so results are in TJ.
+#    mutate(cool_ac_TJ = en_dem_c_ac * shr_acc_cool * n_units_fuel / 1e6 * hh_size * floor_cap * 3.6) %>% # converted from kWh to MJ (3.6). Houssing units are in million, so results are in TJ.
+#    mutate(cool_fans_TJ = en_dem_c_fans * shr_acc_cool * n_units_fuel / 1e6 * hh_size * floor_cap * 3.6) %>% # Note:shr_acc_cool=1 for all cases (access calculated before) #converted from kWh to MJ (3.6). Houssing units are in million, so results are in TJ.
     mutate(cool_TJ = en_dem_cool * 1 * n_units_fuel / 1e6 * hh_size * floor_cap * 3.6) %>% # converted from kWh to MJ (3.6). Houssing units are in million, so results are in TJ.
     mutate(cool_ac_TJ = en_dem_c_ac * 1 * n_units_fuel / 1e6 * hh_size * floor_cap * 3.6) %>% # converted from kWh to MJ (3.6). Houssing units are in million, so results are in TJ.
     mutate(cool_fans_TJ = en_dem_c_fans * 1 * n_units_fuel / 1e6 * hh_size * floor_cap * 3.6) %>% # Note:shr_acc_cool=1 for all cases (access calculated before) #converted from kWh to MJ (3.6). Houssing units are in million, so results are in TJ.
@@ -571,8 +633,8 @@ if(sector == "comm"){
     #mutate(floor_heat_Mm2 = ifelse(acc_heat == 1, floor_Mm2, 0)) %>%
     mutate(floor_cool_Mm2 = ifelse(shr_acc_cool == 1, floor_Mm2 * shr_acc_cool, 0)) %>%
     mutate(heat_TJ = ifelse(fuel_heat == "v_no_heat", 0, en_dem_heat * n_units_fuel / 1e6 * 3.6)) %>% # converted from kWh to MJ (3.6). Houssing units are in million, so results are in TJ.
-   # mutate(cool_TJ = en_dem_cool * shr_acc_cool * n_units_fuel / 1e6 * 3.6) %>% # converted from kWh to MJ (3.6). Houssing units are in million, so results are in TJ.
-   # mutate(cool_ac_TJ = en_dem_c_ac * shr_acc_cool * n_units_fuel / 1e6 * 3.6) %>% # converted from kWh to MJ (3.6). Houssing units are in million, so results are in TJ.
+    #mutate(cool_TJ = en_dem_cool * shr_acc_cool * n_units_fuel / 1e6 * 3.6) %>% # converted from kWh to MJ (3.6). Houssing units are in million, so results are in TJ.
+    #mutate(cool_ac_TJ = en_dem_c_ac * shr_acc_cool * n_units_fuel / 1e6 * 3.6) %>% # converted from kWh to MJ (3.6). Houssing units are in million, so results are in TJ.
     #mutate(cool_fans_TJ = en_dem_c_fans * shr_acc_cool * n_units_fuel / 1e6 * 3.6) %>% # Note:shr_acc_cool=1 for all cases (access calculated before) #converted from kWh to MJ (3.6). Houssing units are in million, so results are in TJ.
     mutate(cool_TJ = en_dem_cool * 1 * n_units_fuel / 1e6 * 3.6) %>% # converted from kWh to MJ (3.6). Houssing units are in million, so results are in TJ.
     mutate(cool_ac_TJ = en_dem_c_ac * 1 * n_units_fuel / 1e6 * 3.6) %>% # converted from kWh to MJ (3.6). Houssing units are in million, so results are in TJ.
@@ -653,6 +715,7 @@ if("material" %in% report_var){
     mutate(mat_stock_Mt = n_units * hh_size * floor_cap * mat_int / 1e3 / 1e6) %>% #Mt/y
     mutate(mat_demand_Mt = n_new * hh_size * floor_cap * mat_int / stp / 1e3 / 1e6) %>% #Mt/y
     mutate(mat_scrap_Mt = n_dem * hh_size * floor_cap * mat_int / stp / 1e3 / 1e6) %>% #Mt/y
+      
     # select_at(c(geo_levels, paste(c("urt", "clim", "inc_cl", "arch", "mat", "eneff", "material", ##### CHECK yr_con
     #                                 "scenario", "ssp", "year",
     #                                 "floor_tot_Mm2",
@@ -671,9 +734,188 @@ if("material" %in% report_var){
               mat_stock_Mt = sum(mat_stock_Mt),
               mat_demand_Mt = sum(mat_demand_Mt),
               mat_scrap_Mt = sum(mat_scrap_Mt)) %>%  
+      
     ungroup %>%
     mutate(mat_int = 1e3*mat_stock_Mt/floor_tot_Mm2) # Recalculate average material intensity
-  
+      
+    ## add material end-of-life treatments
+    # find the user-defined treatments other than reuse, recycling, and others
+    other_treatments <- setdiff(unique(shr_mat_eol$eol_treat), c("reuse", "recycling", "others"))
+    
+    # Calculate reuse and recycling at the selected geographic level,
+    # depending on total demand within each geographic group
+    # Geographic and material dimensions used for EOL aggregation
+    eol_group_vars <- unique(
+      c(
+        geo_levels,
+        "mat",
+        "material",
+        "scenario",
+        "year"
+      )
+    )
+    
+    # Calculate reuse and recycling at the selected geographic level,
+    # depending on total material demand within each geographic group
+    mat_reuse_recyc_aggr_i <- mat_stock_i %>%
+      
+      # Aggregate demand and scrap to the selected geographic level
+      group_by_at(
+        eol_group_vars
+      ) %>%
+      
+      summarise(
+        mat_demand_Mt = sum(mat_demand_Mt),
+        mat_scrap_Mt = sum(mat_scrap_Mt),
+        .groups = "drop"
+      ) %>%
+      
+      left_join(
+        shr_mat_eol %>%
+          pivot_wider(
+            names_from = eol_treat,
+            values_from = shr_mat_eol
+          ),
+        by = c(
+          "region_gea",
+          "material",
+          "year"
+        )
+      ) %>%
+      
+      # Reuse and recycling, only if present
+      mutate(
+        mat_reuse_Mt = if (
+          "reuse" %in% unique(shr_mat_eol$eol_treat)
+        ) {
+          pmin(
+            mat_demand_Mt,
+            mat_scrap_Mt * reuse
+          )
+        } else {
+          0
+        },
+        
+        mat_recycling_Mt = if (
+          "recycling" %in% unique(shr_mat_eol$eol_treat)
+        ) {
+          pmin(
+            mat_demand_Mt - mat_reuse_Mt,
+            mat_scrap_Mt * recycling
+          )
+        } else {
+          0
+        }
+      ) %>%
+      
+      # Select relevant columns
+      select_at(
+        c(
+          eol_group_vars,
+          "mat_reuse_Mt",
+          "mat_recycling_Mt"
+        )
+      ) %>%
+      
+      rename(
+        mat_reuse_aggr_Mt = mat_reuse_Mt,
+        mat_recycling_aggr_Mt = mat_recycling_Mt
+      )
+    
+    # Disaggregate reuse and recycling, then calculate other treatments
+    mat_stock_i <- mat_stock_i %>%
+      
+      left_join(
+        shr_mat_eol %>%
+          pivot_wider(
+            names_from = eol_treat,
+            values_from = shr_mat_eol
+          ),
+        by = c(
+          "region_gea",
+          "material",
+          "year"
+        )
+      ) %>%
+      
+      # Allocate geographically aggregated reuse and recycling
+      # using weights based on material demand
+      left_join(
+        mat_reuse_recyc_aggr_i,
+        by = eol_group_vars
+      ) %>%
+      
+      group_by_at(
+        eol_group_vars
+      ) %>%
+      
+      mutate(
+        # Calculate the weight for each row within this group
+        weight = mat_demand_Mt / sum(mat_demand_Mt),
+        
+        # Replace NaN with zero when total demand is zero
+        weight = ifelse(
+          is.nan(weight),
+          0,
+          weight
+        ),
+        
+        # Allocate reuse proportionally
+        mat_reuse_alloc_Mt =
+          first(mat_reuse_aggr_Mt) * weight,
+        
+        # Allocate recycling proportionally
+        mat_recycling_alloc_Mt =
+          first(mat_recycling_aggr_Mt) * weight
+      ) %>%
+      
+      ungroup() %>%
+      
+      # Remove temporary columns
+      select(
+        -c(
+          mat_reuse_aggr_Mt,
+          mat_recycling_aggr_Mt,
+          weight
+        )
+      ) %>%
+      
+      # other treatments
+      mutate(
+        across(
+          any_of(.env$other_treatments),
+          ~ mat_scrap_Mt * .,
+          .names = "mat_{.col}_Mt"
+        )
+      ) %>%
+      
+      # residual "others" as: scrap - (reuse + recycling + all other_treatments)
+      mutate(
+        .allocated_Mt = mat_reuse_alloc_Mt + mat_recycling_alloc_Mt +
+          rowSums(
+            pick(any_of(paste0("mat_", .env$other_treatments, "_Mt"))),
+            na.rm = TRUE
+          ),
+        mat_other_treat_Mt = if ("others" %in% names(pick(everything())))
+          pmax(0, mat_scrap_Mt - .allocated_Mt) else 0
+      ) %>%
+      select(-.allocated_Mt) %>%
+      
+      # Material demand split into primary, secondary production from recycling or reuse
+      mutate(
+        mat_primary_Mt = pmax(
+          mat_demand_Mt - mat_reuse_alloc_Mt - mat_recycling_alloc_Mt,
+          0
+        )
+      ) %>%
+      
+      # select relevant cols
+      select(-any_of(unique(shr_mat_eol$eol_treat))) %>%
+      rename(mat_reuse_Mt = mat_reuse_alloc_Mt,
+             mat_recycling_Mt = mat_recycling_alloc_Mt
+             )
+    
+    
 } else {
 
   mat_stock_i <- bld_cases_eneff %>%
@@ -696,6 +938,7 @@ if("material" %in% report_var){
     mutate(mat_stock_Mt = n_units * mat_int / 1e3 / 1e6) %>% #Mt
     mutate(mat_demand_Mt = n_new * mat_int / stp / 1e3 / 1e6) %>% #Mt/y
     mutate(mat_scrap_Mt = n_dem * mat_int / stp / 1e3 / 1e6) %>% #Mt/y
+    
     # select_at(c(geo_levels, paste(c("urt", "clim", "inc_cl", "arch", "mat", "eneff", "material",
     #                                 "scenario", "ssp", "year",
     #                                 "floor_tot_Mm2",
@@ -713,8 +956,186 @@ if("material" %in% report_var){
                 mat_stock_Mt = sum(mat_stock_Mt),
                 mat_demand_Mt = sum(mat_demand_Mt),
                 mat_scrap_Mt = sum(mat_scrap_Mt)) %>%  
+
       ungroup %>%
       mutate(mat_int = 1e3*mat_stock_Mt/floor_tot_Mm2) # Recalculate average material intensity
+  
+  ## add material end-of-life treatments
+  # find the user-defined treatments other than reuse, recycling, and others
+  other_treatments <- setdiff(unique(shr_mat_eol$eol_treat), c("reuse", "recycling", "others"))
+  
+  # Geographic and material dimensions used for EOL aggregation
+  eol_group_vars <- unique(
+    c(
+      geo_levels,
+      "mat",
+      "material",
+      "scenario",
+      "year"
+    )
+  )
+  
+  # Calculate reuse and recycling at the selected geographic level,
+  # depending on total material demand within each geographic group
+  mat_reuse_recyc_aggr_i <- mat_stock_i %>%
+    
+    # Aggregate demand and scrap to the selected geographic level
+    group_by_at(
+      eol_group_vars
+    ) %>%
+    
+    summarise(
+      mat_demand_Mt = sum(mat_demand_Mt),
+      mat_scrap_Mt = sum(mat_scrap_Mt),
+      .groups = "drop"
+    ) %>%
+    
+    left_join(
+      shr_mat_eol %>%
+        pivot_wider(
+          names_from = eol_treat,
+          values_from = shr_mat_eol
+        ),
+      by = c(
+        "region_gea",
+        "material",
+        "year"
+      )
+    ) %>%
+    
+    # Reuse and recycling, only if present
+    mutate(
+      mat_reuse_Mt = if (
+        "reuse" %in% unique(shr_mat_eol$eol_treat)
+      ) {
+        pmin(
+          mat_demand_Mt,
+          mat_scrap_Mt * reuse
+        )
+      } else {
+        0
+      },
+      
+      mat_recycling_Mt = if (
+        "recycling" %in% unique(shr_mat_eol$eol_treat)
+      ) {
+        pmin(
+          mat_demand_Mt - mat_reuse_Mt,
+          mat_scrap_Mt * recycling
+        )
+      } else {
+        0
+      }
+    ) %>%
+    
+    # Select relevant columns
+    select_at(
+      c(
+        eol_group_vars,
+        "mat_reuse_Mt",
+        "mat_recycling_Mt"
+      )
+    ) %>%
+    
+    rename(
+      mat_reuse_aggr_Mt = mat_reuse_Mt,
+      mat_recycling_aggr_Mt = mat_recycling_Mt
+    )
+  
+  # Disaggregate reuse and recycling, then calculate other treatments
+  mat_stock_i <- mat_stock_i %>%
+    
+    left_join(
+      shr_mat_eol %>%
+        pivot_wider(
+          names_from = eol_treat,
+          values_from = shr_mat_eol
+        ),
+      by = c(
+        "region_gea",
+        "material",
+        "year"
+      )
+    ) %>%
+    
+    # Allocate geographically aggregated reuse and recycling
+    # using weights based on material demand
+    left_join(
+      mat_reuse_recyc_aggr_i,
+      by = eol_group_vars
+    ) %>%
+    
+    group_by_at(
+      eol_group_vars
+    ) %>%
+    
+    mutate(
+      # Calculate the weight for each row within this group
+      weight = mat_demand_Mt / sum(mat_demand_Mt),
+      
+      # Replace NaN with zero when total demand is zero
+      weight = ifelse(
+        is.nan(weight),
+        0,
+        weight
+      ),
+      
+      # Allocate reuse proportionally
+      mat_reuse_alloc_Mt =
+        first(mat_reuse_aggr_Mt) * weight,
+      
+      # Allocate recycling proportionally
+      mat_recycling_alloc_Mt =
+        first(mat_recycling_aggr_Mt) * weight
+    ) %>%
+    
+    ungroup() %>%
+    
+    # Remove temporary columns
+    select(
+      -c(
+        mat_reuse_aggr_Mt,
+        mat_recycling_aggr_Mt,
+        weight
+      )
+    ) %>%
+    
+    # other treatments
+    mutate(
+      across(
+        any_of(.env$other_treatments),
+        ~ mat_scrap_Mt * .,
+        .names = "mat_{.col}_Mt"
+      )
+    ) %>%
+    
+    # residual "others" as: scrap - (reuse + recycling + all other_treatments)
+    mutate(
+      .allocated_Mt = mat_reuse_alloc_Mt + mat_recycling_alloc_Mt +
+        rowSums(
+          pick(any_of(paste0("mat_", .env$other_treatments, "_Mt"))),
+          na.rm = TRUE
+        ),
+      mat_other_treat_Mt = if ("others" %in% names(pick(everything())))
+        pmax(0, mat_scrap_Mt - .allocated_Mt) else 0
+    ) %>%
+    select(-.allocated_Mt) %>%
+    
+    # Material demand split into primary, secondary production from recycling or reuse
+    mutate(
+      mat_primary_Mt = pmax(
+        mat_demand_Mt - mat_reuse_alloc_Mt - mat_recycling_alloc_Mt,
+        0
+      )
+    ) %>%
+    
+    # select relevant cols
+    select(-any_of(unique(shr_mat_eol$eol_treat))) %>%
+    rename(mat_reuse_Mt = mat_reuse_alloc_Mt,
+           mat_recycling_Mt = mat_recycling_alloc_Mt
+    )
+  
+  
 }
 
 ## Stock results - Material - Add Cement
@@ -726,7 +1147,12 @@ mat_stock_cem_i <- mat_stock_i %>%
   mutate(material = "cement") %>%
   mutate(mat_stock_Mt = mat_stock_Mt * cement_content,
          mat_demand_Mt = mat_demand_Mt * cement_content,
-         mat_scrap_Mt = mat_scrap_Mt * cement_content)
+         mat_scrap_Mt = mat_scrap_Mt * cement_content,
+         mat_reuse_Mt = mat_reuse_Mt * cement_content,
+         mat_recycling_Mt = mat_recycling_Mt * cement_content,
+         mat_downcycling_Mt = mat_downcycling_Mt * cement_content,
+         mat_other_treat_Mt = mat_other_treat_Mt * cement_content,
+         mat_primary_Mt = mat_primary_Mt * cement_content)
 
 mat_stock_i <- rbind(mat_stock_i, mat_stock_cem_i)
 }
@@ -747,18 +1173,31 @@ if ("vintage" %in% report_var){
 if ("energy" %in% report_var){report$en_stock <-  bind_rows(report$en_stock,en_stock_i)}
 if ("material" %in% report_var){report$mat_stock <- bind_rows(report$mat_stock,mat_stock_i)}
 
-output = list(#en_stock = en_stock,
-  #mat_stock = mat_stock,
+if (mod_vacant == "vacant"){report$vacant_stock <- bind_rows(report$vacant_stock,
+                                                             stock_vacant_i %>%
+                                                               group_by_at(setdiff(names(stock_vacant_i), c("bld_age","yr_con","stock_vacant","stock_reocc"))) %>%
+                                                               summarise(stock_vacant_M = sum(stock_vacant)/1e6,
+                                                                         stock_reocc_M = sum(stock_reocc)/1e6) %>%
+                                                               ungroup() %>%
+                                                               mutate(scenario = run))}# V:
+
+output <- list(
+  # en_stock = en_stock,
+  # mat_stock = mat_stock,
   report = report,
-  #stock_eneff.df = stock_eneff.df, 
+  # stock_eneff.df = stock_eneff.df, 
   stock_aggr = stock_aggr, 
-  bld_det_age_i = bld_det_age_i#, 
-  #bld_det = bld_det, 
-  #bld_eneff_age = bld_eneff_age
-  #ms_new_i, ms_ren_i,
-  #ms_new = ms_new, 
-  #ms_ren = ms_ren
+  bld_det_age_i = bld_det_age_i
+  # bld_det = bld_det, 
+  # bld_eneff_age = bld_eneff_age
+  # ms_new_i, ms_ren_i,
+  # ms_new = ms_new, 
+  # ms_ren = ms_ren
 )
 
+if (mod_vacant == "vacant") {
+  output <- append(output, list(stock_vacant_i = stock_vacant_i))
 }
 
+return(output)
+}

@@ -5,7 +5,8 @@ This is a fork of the [Message-ix Buildings](https://github.com/main/message-ix-
 
 ## Description
 
-This branch builds upon the original codebase to estimate daily heating/cooling energy intensity using climate model data and scenarios. It integrates spatial and temporal data inputs to produce high-resolution, grid-based output suitable for large-scale analysis. The resulting energy intensities are then combined with the projection of building stock dynamics from the STURM to derive energy demand.
+This branch builds upon the original codebase to estimate daily heating/cooling energy intensity using climate model data and scenarios. It integrates spatial and temporal data inputs to produce high-resolution, grid-based output suitable for large-scale analysis. The resulting energy intensities are then combined with the projection of building stock dynamics from the STURM to derive energy demand. The STURM workflow has also been adapted to establish a connection with MESSAGEix-BMT, enabling consistent estimation of building energy demand by combining MESSAGEix-BMT with CHILLED-derived daily energy intensities.
+
 
 
 ## Main Inputs & Outputs
@@ -42,7 +43,4 @@ In our default version, the following key configurations are applied to save run
 **Note:**  
 Daily output is recommended because the gridded climate impact only needs to be simulated once. Subsequent further postprocessing can be performed efficiently without rerunning the entire simulation. However, please be aware that exporting daily outputs can consume significant disk space.
 Monthly gridded outputs provide a useful compromise between temporal detail and storage efficiency for long-term scenario analysis under different SSPs.
-
-
-
 

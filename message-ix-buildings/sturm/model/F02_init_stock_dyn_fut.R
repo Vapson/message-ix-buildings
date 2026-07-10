@@ -5,10 +5,13 @@
 
 fun_stock_init_fut <- function(sector, run,
                                mod_arch, # mod_arch = "new", mod_arch = "stock"
+                               mod_vacant, #V:
                                yrs,
                                geo_data, geo_levels, geo_level,
                                bld_cases_eneff, bld_cases_fuel,
                                pop,
+                               pop_urt,
+                               pop_clim,
                                hh_size, # used for residential
                                floor_cap, # used for commercial
                                ct_inc_cl,
@@ -17,6 +20,12 @@ fun_stock_init_fut <- function(sector, run,
                                shr_mat, shr_arch, 
                                shr_fuel_heat_base,
                                shr_distr_heat,
+                               stock_vacant_base, #V:
+                               shr_vacant_base_arch, #V:
+                               shr_vacant_base_period, #V:
+                               # rate_vacant_occ, #V:
+                               # shr_vacant_occ_eneff,#V:
+                               # shr_vacant_occ_fuel,#V:
                                en_int_heat,en_int_cool, # Energy demand calculation base year - should be updated for commercial!
                                days_cool,
                                eff_cool,
@@ -61,34 +70,271 @@ fun_stock_init_fut <- function(sector, run,
   # number of income classes
   n_inc_cl <- length(unique(ct_inc_cl$inc_cl))
   
-  # Total number of building units: (Residential: number of households (units) - Commercial: total floorspace (m2))
-  if (sector == "resid") {
-    bld_units <- geo_data %>%
-      select_at(geo_levels) %>%
-      left_join(pop) %>%
-      filter(year %in% yrs[-1]) %>% 
-      left_join(hh_size) %>% 
-      mutate(bld_units = round(1e6*pop/n_inc_cl/hh_size,rnd)) %>% # convert from million units to units
-      select(-c(pop,hh_size)) # %>%
-    #filter(year %in% yrs) # years already filtered
-    
-    
-    
-    try(if(nrow(bld_units) != nrow(distinct(bld_units))) stop("Error in aggregated households calculations! duplicated records in hh"))
+  # ----------------------------------------------------------
+  # Standardise input column names
+  # ----------------------------------------------------------
+  
+  pop_clean <- pop
+  pop_urt_clean <- pop_urt
+  pop_clim_clean <- pop_clim
+  hh_size_clean <- hh_size
+  floor_cap_clean <- floor_cap
+  
+  if (
+    "value" %in% names(pop_clean) &&
+    !"pop" %in% names(pop_clean)
+  ) {
+    pop_clean <- pop_clean %>%
+      rename(pop = value)
   }
-
-  if (sector == "comm") {
-    bld_units <- geo_data %>%
-      select_at(geo_levels) %>%
-      left_join(pop) %>% 
-      filter(year %in% yrs[-1]) %>% 
-      left_join(floor_cap) %>% 
-      mutate(bld_units = round(1e6*pop*floor_cap,rnd)) %>% # convert from million units to units
-      # mutate(bld_units = round(pop*floor_cap,rnd)) %>% # million units
-      select(-c(pop,floor_cap)) # %>%
-    #filter(year %in% yrs) # years already filtered
+  
+  if (
+    "value" %in% names(pop_urt_clean) &&
+    !"pop_urt" %in% names(pop_urt_clean)
+  ) {
+    pop_urt_clean <- pop_urt_clean %>%
+      rename(pop_urt = value)
+  }
+  
+  if (
+    "value" %in% names(pop_clim_clean) &&
+    !"pop_clim" %in% names(pop_clim_clean)
+  ) {
+    pop_clim_clean <- pop_clim_clean %>%
+      rename(pop_clim = value)
+  }
+  
+  if (
+    "value" %in% names(hh_size_clean) &&
+    !"hh_size" %in% names(hh_size_clean)
+  ) {
+    hh_size_clean <- hh_size_clean %>%
+      rename(hh_size = value)
+  }
+  
+  if (
+    "value" %in% names(floor_cap_clean) &&
+    !"floor_cap" %in% names(floor_cap_clean)
+  ) {
+    floor_cap_clean <- floor_cap_clean %>%
+      rename(floor_cap = value)
+  }
+  
+  
+  # ----------------------------------------------------------
+  # Validate population inputs
+  # ----------------------------------------------------------
+  
+  if (!"pop" %in% names(pop_clean)) {
+    stop(
+      "Column `pop` not found in the total-population input."
+    )
+  }
+  
+  if (!"pop_urt" %in% names(pop_urt_clean)) {
+    stop(
+      "Column `pop_urt` not found in the urban/rural population-share input."
+    )
+  }
+  
+  if (!"pop_clim" %in% names(pop_clim_clean)) {
+    stop(
+      "Column `pop_clim` not found in the climate-zone population-share input."
+    )
+  }
+  
+  
+  # ----------------------------------------------------------
+  # Combine separate population inputs
+  #
+  # total population
+  #   × urban/rural share
+  #   × climate-zone share
+  # ----------------------------------------------------------
+  
+  population_detailed <- geo_data %>%
+    select_at(
+      geo_levels
+    ) %>%
+    left_join(
+      pop_clean,
+      by = "region_bld"
+    ) %>%
+    left_join(
+      pop_urt_clean,
+      by = c(
+        "region_bld",
+        "year"
+      )
+    ) %>%
+    mutate(
+      pop = pop * pop_urt
+    ) %>%
+    select(
+      -pop_urt
+    ) %>%
+    left_join(
+      pop_clim_clean,
+      by = c(
+        "region_bld",
+        "urt"
+      )
+    ) %>%
+    mutate(
+      pop = pop * pop_clim
+    ) %>%
+    select(
+      -pop_clim
+    ) %>%
+    filter(
+      year %in% yrs
+    )
+  
+  
+  # ----------------------------------------------------------
+  # Residential building units
+  # ----------------------------------------------------------
+  
+  if (sector == "resid") {
     
-    try(if(nrow(bld_units) != nrow(distinct(bld_units))) stop("Error in aggregated households calculations! duplicated records in hh"))
+    if (!"hh_size" %in% names(hh_size_clean)) {
+      stop(
+        "Column `hh_size` not found in the household-size input."
+      )
+    }
+    
+    bld_units <- population_detailed %>%
+      left_join(
+        hh_size_clean,
+        by = c(
+          "region_bld",
+          "urt",
+          "year"
+        )
+      ) %>%
+      mutate(
+        bld_units = round(
+          1e6 * pop / n_inc_cl / hh_size,
+          rnd
+        )
+      ) %>%
+      select(
+        -c(
+          pop,
+          hh_size
+        )
+      )
+    
+    try(
+      if (
+        nrow(bld_units) !=
+        nrow(distinct(bld_units))
+      ) {
+        stop(
+          paste(
+            "Error in aggregated household calculations:",
+            "duplicated records in bld_units."
+          )
+        )
+      }
+    )
+  }
+  
+  
+  # ----------------------------------------------------------
+  # Commercial building units
+  # ----------------------------------------------------------
+  
+  if (sector == "comm") {
+    
+    if (!"floor_cap" %in% names(floor_cap_clean)) {
+      stop(
+        "Column `floor_cap` not found in the commercial floor-cap input."
+      )
+    }
+    
+    geo_lookup <- geo_data %>%
+      select(
+        any_of(
+          c(
+            "region_bld",
+            "region_gea"
+          )
+        )
+      ) %>%
+      distinct()
+    
+    base_comm <- floor_cap_clean %>%
+      filter(
+        year %in% yrs
+      )
+    
+    if (!"region_gea" %in% names(base_comm)) {
+      base_comm <- base_comm %>%
+        left_join(
+          geo_lookup,
+          by = "region_bld"
+        )
+    }
+    
+    by_pop <- intersect(
+      c(
+        "region_bld",
+        "region_gea",
+        "urt",
+        "clim",
+        "year"
+      ),
+      intersect(
+        names(base_comm),
+        names(population_detailed)
+      )
+    )
+    
+    bld_units <- base_comm %>%
+      left_join(
+        population_detailed,
+        by = by_pop
+      ) %>%
+      mutate(
+        bld_units = round(
+          1e6 * pop * floor_cap,
+          rnd
+        )
+      ) %>%
+      select(
+        -c(
+          pop,
+          floor_cap
+        )
+      ) %>%
+      arrange(
+        across(
+          any_of(
+            c(
+              "region_bld",
+              "region_gea",
+              "urt",
+              "clim",
+              "year"
+            )
+          )
+        )
+      )
+    
+    try(
+      if (
+        nrow(bld_units) !=
+        nrow(distinct(bld_units))
+      ) {
+        stop(
+          paste(
+            "Error in aggregated commercial floor-area calculations:",
+            "duplicated records in bld_units."
+          )
+        )
+      }
+    )
   }
   
   
@@ -145,18 +391,6 @@ fun_stock_init_fut <- function(sector, run,
     
     try(if(nrow(stock_aggr) != nrow(distinct(stock_aggr %>% select(-c(n_units_aggr))))) stop("Error in aggregated stock dataset! multiple records for same combinations in stock_aggr"))
     
-    # Stock aggregated (mat level) - baseyear 
-    stock_aggr_base <- geo_data %>%
-      select_at(geo_levels) %>%
-      left_join(stock_arch_base) %>% 
-      group_by_at(setdiff(names(stock_arch_base), c("bld_age", "yr_con", "stock_arch_base"))) %>% # Select all variables, except the ones specified
-      summarise(n_units_aggr = sum(stock_arch_base)) %>%
-      ungroup()
-    
-    # stock aggregated - combined
-    stock_aggr = bind_rows(stock_aggr, stock_aggr_base) %>%
-      arrange_at(c(geo_level, "urt", "inc_cl", "region_gea", "clim", "mat", "arch", "year"))
-    
     # Add stock variation aggregated
     stock_aggr <- stock_aggr %>%
       # group_by(year) %>%
@@ -169,34 +403,101 @@ fun_stock_init_fut <- function(sector, run,
 
   try(if(nrow(stock_aggr) != nrow(distinct(stock_aggr %>% select(-c(n_units_aggr,var_aggr))))) stop("Error in aggregated stock dataset! multiple records for same combinations in stock_aggr"))
   
-  # # TEST: N. units 2050 - CPA
-  # sum(stock_aggr %>% filter(region_bld == "R32CHN" & year == 2050) %>% select(n_units_aggr) %>% pull)/1e6 # Million units
+  # # calculate share of eneff in the base year based on the base stock data
+  # shr_eneff <- bld_cases_eneff %>%
+  #   mutate(year = yrs[1]) %>%
+  #   left_join(stock_arch_base) %>%
+  #   group_by_at(setdiff(names(stock_arch_base),c("yr_con","stock_arch_base"))) %>%
+  #   summarise(shr_eneff = sum(stock_arch_base)) %>%
+  #   ungroup() %>%
+  #   mutate(shr_eneff = ifelse(is.na(shr_eneff), 0, shr_eneff)) 
   
-  
+  # process base stock data
+  stock_arch_base <- bld_cases_eneff %>%
+    mutate(year = yrs[1]) %>%
+    left_join(stock_arch_base) %>%
+    mutate(stock_arch_base = ifelse(is.na(stock_arch_base), 0, stock_arch_base)) 
   
   # initialize DF stock by vintage (baseyear) - detailed fuel level
-  bld_det_age_i <- geo_data %>%
-    select_at(geo_levels) %>%
-    left_join(stock_arch_base) %>% # baseyear results
+  bld_det_age_i <- stock_aggr %>%
+      select(-var_aggr) %>%
+      filter(year == yrs[1]) %>%  # baseyear results
     left_join(ct_eneff) %>% 
     left_join(ct_fuel_comb) %>% 
+    left_join(stock_arch_base) %>%
     left_join(shr_fuel_heat_base) %>%
     left_join(shr_distr_heat) %>%
     #left_join(shr_acc_cool) %>%
-    mutate(n_units_eneff = stock_arch_base) %>% # assumption: one eneff per period of construction
+    mutate(n_units_eneff = n_units_aggr * stock_arch_base) %>% 
     mutate(n_units_fuel = ifelse(fuel_heat == "district_heat", 
                                  round(n_units_eneff * shr_distr_heat,rnd), # district heating 
                                  round(n_units_eneff * (1 - shr_distr_heat) * shr_fuel_heat_base,rnd))) %>% # other fuels (decentralized)
     mutate(n_units_fuel = round(n_units_fuel, rnd)) %>%
     mutate_cond(mat == "sub", n_units_fuel = n_units_eneff) %>% # sub-standard buildings - one fuel type only
-    select(-c(stock_arch_base, shr_fuel_heat_base, shr_distr_heat, n_units_eneff, mod_decision))
-    
+    select(-c(stock_arch_base,n_units_aggr, shr_fuel_heat_base, shr_distr_heat, n_units_eneff,  mod_decision)) %>%
+    filter(!is.na(yr_con))
+
     # ## other option: start from bld cases
     # bld_fuel_age <- bld_cases_fuel %>% 
     #   mutate(year = yrs[1]) %>%
   
   # initialize bld_arch: stock data - arch level - NOT NEEDED!
   #bld_det <- as.data.frame(NULL)
+  
+  ### Vacant buildings ### #V:
+  
+  if (mod_vacant == "vacant") {
+    
+    # TBD: data vacant buildings by arch/eneff
+    
+    # Initialize stock vacant buildings - base year
+    
+    # process base stock data
+    stock_vacant_i <- bld_cases_eneff %>%
+      mutate(year = yrs[1]) %>%
+      left_join(stock_vacant_base) %>%
+      left_join(shr_vacant_base_arch) %>%
+      left_join(shr_vacant_base_period) %>%
+      mutate(stock_vacant = ifelse(is.na(shr_vacant_base_period), 0, 
+                                   stock_vacant_base * shr_vacant_base_arch * shr_vacant_base_period)) %>%
+      mutate(stock_vacant = ifelse(is.na(stock_vacant),0,stock_vacant)) %>%
+      select(-c(shr_vacant_base_arch,shr_vacant_base_period,stock_vacant_base)) 
+    
+    # # aggregate at eneff level - not needed here
+    # stock_vacant_eneff_base <- stock_vacant_eneff_base %>%
+    #   group_by_at(setdiff(names(stock_vacant_eneff_base), c("bld_age","yr_con"))) %>%
+    #   summarise(stock_vacant = sum(stock_vacant)) %>%
+    #   ungroup()
+    
+    # In script F06:future projections of vacant building stock - based on number of re-occupied buildings
+    
+    ### Re-occupied Vacant stock by fuel to be added in script F06
+    # # initialize DF stock - vacant buildings - by vintage (baseyear) - detailed fuel level
+    # bld_det_age_i <- stock_aggr %>%
+    #   select(-var_aggr) %>%
+    #   filter(year == yrs[1]) %>%  # baseyear results
+    #   left_join(ct_eneff) %>% 
+    #   left_join(ct_fuel_comb) %>% 
+    #   left_join(stock_arch_base) %>%
+    #   left_join(shr_fuel_heat_base) %>%
+    #   left_join(shr_distr_heat) %>%
+    #   #left_join(shr_acc_cool) %>%
+    #   mutate(n_units_eneff = n_units_aggr * stock_arch_base) %>% 
+    #   mutate(n_units_fuel = ifelse(fuel_heat == "district_heat", 
+    #                                round(n_units_eneff * shr_distr_heat,rnd), # district heating 
+    #                                round(n_units_eneff * (1 - shr_distr_heat) * shr_fuel_heat_base,rnd))) %>% # other fuels (decentralized)
+    #   mutate(n_units_fuel = round(n_units_fuel, rnd)) %>%
+    #   mutate_cond(mat == "sub", n_units_fuel = n_units_eneff) %>% # sub-standard buildings - one fuel type only
+    #   select(-c(stock_arch_base,n_units_aggr, shr_fuel_heat_base, shr_distr_heat, n_units_eneff,  mod_decision)) %>%
+    #   filter(!is.na(yr_con))
+    
+    
+    # rate_vacant_occ, #V:
+    # shr_vacant_occ_eneff,#V:
+    # shr_vacant_occ_fuel,#V:
+    # shr_vacant_occ_fuel, #V:
+    
+  }
   
   # Report energy and material results 
 
@@ -216,6 +517,17 @@ fun_stock_init_fut <- function(sector, run,
     
     report = append(report, list(bld_eneff_age = bld_eneff_age))
   }
+  
+  if (mod_vacant == "vacant"){
+    report = append(report, list(vacant_stock = stock_vacant_i %>%
+                                   group_by_at(setdiff(names(stock_vacant_i), c("bld_age","yr_con","stock_vacant"))) %>%
+                                   summarise(stock_vacant_M = sum(stock_vacant)/1e6) %>%
+                                   ungroup() %>%
+                                   mutate(
+                                     stock_reocc_M = 0,
+                                     scenario = run
+                                   )))} # V:
+  
   
   # Initialize en_stock for the base year
   
@@ -365,24 +677,29 @@ fun_stock_init_fut <- function(sector, run,
                                       "heat_TJ", "cool_TJ", "cool_ac_TJ", "cool_fans_TJ", "hotwater_TJ", "other_uses_TJ"))))
   }
   
-
+  
   # Add results for the base year for reporting
   if ("energy" %in% report_var){report$en_stock <-  bind_rows(report$en_stock,en_stock)}
-  #if ("material" %in% report_var){report$mat_stock <- bind_rows(report$mat_stock,mat_stock)}
+  # if ("material" %in% report_var){report$mat_stock <- bind_rows(report$mat_stock,mat_stock)}
   
   #OUTPUT
   
-  output = list(stock_aggr = stock_aggr,
-                bld_det_age_i = bld_det_age_i,
-                # bld_det = bld_det,
-                # bld_eneff_age = bld_eneff_age,
-                # en_stock = en_stock,
-                # mat_stock = mat_stock
-                report = report
-                )
-
+  output <- list(
+    stock_aggr = stock_aggr,
+    bld_det_age_i = bld_det_age_i,
+    # bld_det = bld_det,
+    # bld_eneff_age = bld_eneff_age,
+    # en_stock = en_stock,
+    # mat_stock = mat_stock
+    report = report
+  )
   
+  if (mod_vacant == "vacant") {
+    output <- append(output, list(stock_vacant_i = stock_vacant_i))
   }
+  
+  return(output)
+}
 
 # bld_aggr_age <- stock_aggr%>% 
 #   filter(year == yrs[1]) %>% 

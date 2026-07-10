@@ -3,7 +3,7 @@
 
 ## geo_level_report should be one of the column in the DF "geo_data"
 
-fun_report_basic <- function(report, report_var, geo_data, geo_level, geo_level_report, sector, scenario_name, path_out){
+fun_report_basic <- function(report, report_var, mod_vacant, geo_data, geo_level, geo_level_report, sector, scenario_name, path_out){ #V:
   
   print(paste0("Aggregate and report results - STURM Basic Report"))
 
@@ -50,7 +50,12 @@ fun_report_basic <- function(report, report_var, geo_data, geo_level, geo_level_
                     floor_dem_Mm2 = sum(floor_dem_Mm2), 
                     mat_stock_Mt = sum(mat_stock_Mt),   
                     mat_demand_Mt = sum(mat_demand_Mt),
-                    mat_scrap_Mt = sum(mat_scrap_Mt))%>%
+                    mat_primary_Mt = sum(mat_primary_Mt),
+                    mat_scrap_Mt = sum(mat_scrap_Mt),
+                    mat_reuse_Mt = sum(mat_reuse_Mt),
+                    mat_recycling_Mt = sum(mat_recycling_Mt),
+                    mat_downcycling_Mt = sum(mat_downcycling_Mt),
+                    mat_other_treat_Mt = sum(mat_other_treat_Mt))%>%
           ungroup()
       }
     
@@ -71,5 +76,23 @@ fun_report_basic <- function(report, report_var, geo_data, geo_level, geo_level_
           summarise(n_units =sum(n_units_eneff))%>%
           ungroup()}
     write_csv(mat_stock_rep, paste0(path_out,"report_STURM_",scenario_name,"_", sector, "_",geo_level_report, "_vintage.csv") )
+  }
+ 
+   # Write vacant buildings results  
+  if (mod_vacant == "vacant"){ #V:
+    
+    print(paste0("Write vacant buildings results : ", scenario_name))
+    
+    if(geo_level_report == geo_level){
+      vacant_stock_rep <- report$vacant_stock} else {
+        vacant_stock_rep <- report$vacant_stock %>%
+          left_join(geo_data) %>%
+          group_by_at(paste(c(geo_level_report, "urt","arch","mat","eneff",   
+                              "scenario", # "ssp", # drop SSP
+                              "year"))) %>%
+          summarise(stock_vacant_M =sum(stock_vacant_M))%>%
+          ungroup()}
+    
+    write_csv(vacant_stock_rep, paste0(path_out,"report_STURM_",scenario_name,"_", sector, "_",geo_level_report, "_vacant.csv") )
   }
 }
